@@ -1,20 +1,8 @@
-# =====================================================================
-# litterbox_core.yaml
-#
-# Shared "brain" for all Prickly Guy litter box units. Include this
-# from each device's local yaml via a github:// package reference.
-# Anything that's identical across units lives here. Anything that
-# varies per physical unit (device name, friendly name, and pin
-# overrides if a unit is wired differently) stays in the local file.
-#
-# Local file only needs to set: device_name, friendly_name, and the
-# packages: block pointing back here.
-# =====================================================================
 
 substitutions:
   # --- Defaults, override any of these in the local device file if
   #     a specific unit's wiring differs from the standard build ---
-  framework_type: "esp-idf"
+
 
   # --- Motor Driver (BTS7960) ---
   pin_rpwm: GPIO4        # Forward PWM
@@ -55,14 +43,11 @@ esphome:
       - switch.turn_on: left_enable
 
 esp32:
-  # Hardcoded rather than a substitution — the Device Builder GUI's
-  # board-matching dialog can't resolve a substitution here and gets
-  # stuck in a loop. If a future unit uses a different board, override
-  # the whole esp32: block in that device's local file instead.
+
   board: esp32-s3-devkitc-1
   variant: esp32s3
   framework:
-    type: ${framework_type}
+    type: esp-idf
   flash_size: 16MB
 
 psram:
