@@ -1,0 +1,656 @@
+# =====================================================================
+# litterbox_core.yaml
+#
+# Shared "brain" for all Prickly Guy litter box units. Include this
+# from each device's local yaml via a github:// package reference.
+# Anything that's identical across units lives here. Anything that
+# varies per physical unit (device name, friendly name, and pin
+# overrides if a unit is wired differently) stays in the local file.
+#
+# Local file only needs to set: device_name, friendly_name, and the
+# packages: block pointing back here.
+# =====================================================================
+
+substitutions:
+  # --- Defaults, override any of these in the local device file if
+  #     a specific unit's wiring differs from the standard build ---
+  framework_type: "esp-idf"
+
+  # --- Motor Driver (BTS7960) ---
+  pin_rpwm: GPIO4        # Forward PWM
+  pin_lpwm: GPIO5        # Reverse PWM
+  pin_r_en: GPIO6        # Right enable — GPIO, NOT tied to 5V (see notes)
+  pin_l_en: GPIO7        # Left enable — GPIO, NOT tied to 5V (see notes)
+
+  # --- Position Switches ---
+  pin_home_switch: GPIO15
+  pin_dump_switch: GPIO16
+
+  # --- Sensors ---
+  pin_cat_ir: GPIO2       # Factory optical/IR cat sensor
+  pin_bin_sensor: GPIO12  # Future bin-full sensor
+
+  # --- Display (0.91" I2C OLED) ---
+  pin_i2c_sda: GPIO13
+  pin_i2c_scl: GPIO14
+
+# Reserved / avoid on esp32-s3-devkitc-1:
+#   GPIO0, GPIO3, GPIO45, GPIO46  -> strapping
+#   GPIO19, GPIO20                 -> USB D-/D+
+#   GPIO26-32                      -> flash
+#   GPIO33-37                      -> octal PSRAM
+#   GPIO43, GPIO44                 -> UART0 console, leave free
+#   GPIO48 is bound to onboard led
+#   GPIO15-18, 21, 38-42 open for expansion
+
+esphome:
+  comment: Prickly Guy Smart Litter Box
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          id(total_cycles_sensor).publish_state(id(total_cycles));
+          id(last_cycle_sensor).publish_state(id(last_cycle_string));
+      - switch.turn_on: right_enable
+      - switch.turn_on: left_enable
+
+esp32:
+  # Hardcoded rather than a substitution — the Device Builder GUI's
+  # board-matching dialog can't resolve a substitution here and gets
+  # stuck in a loop. If a future unit uses a different board, override
+  # the whole esp32: block in that device's local file instead.
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  framework:
+    type: ${framework_type}
+  flash_size: 16MB
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+
+captive_portal:
+
+web_server:
+  sorting_groups:
+      - id: group_control
+        name: "Control & Active Status"
+      - id: group_sensors
+        name: "Litter Box Sensors"
+      - id: group_config
+        name: "Configuration"
+      - id: group_wifi
+        name: "Network & Diagnostic"
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+globals:
+  - id: jam_retry_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  - id: motion_direction
+    type: int      # 1 = forward, -1 = reverse
+    restore_value: no
+    initial_value: '0'
+
+  - id: fault_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: total_cycles
+    type: uint32_t
+    restore_value: yes
+    initial_value: '0'
+
+  - id: cycle_success
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
+
+  - id: last_cycle_string
+    type: std::string
+    restore_value: yes
+    initial_value: '"Never"'
+
+  - id: stage_done
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  - id: motion_timeout_counter
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # --- Cat presence tracking ---
+  - id: cat_entry_time
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  - id: cat_visit_duration_sec
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+sensor:
+  - platform: template
+    name: "Total Scoop Cycles"
+    id: total_cycles_sensor
+    lambda: |-
+      return id(total_cycles);
+    update_interval: never
+    web_server:
+      sorting_group_id: group_control
+      sorting_weight: 30
+
+  - platform: template
+    name: "Cat Visit Duration"
+    id: cat_visit_duration_sensor
+    unit_of_measurement: "s"
+    icon: "mdi:timer-outline"
+    accuracy_decimals: 0
+    lambda: |-
+      return id(cat_visit_duration_sec);
+    update_interval: never
+    web_server:
+      sorting_group_id: group_sensors
+      sorting_weight: 25
+
+binary_sensor:
+  - platform: template
+    id: motor_jam_detected
+    name: "Motor Jam Detected"
+    lambda: |-
+      return false;
+
+  - platform: gpio
+    id: dump_limit
+    name: "Scoop Dump Limit"
+    pin:
+      number: ${pin_dump_switch}
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    web_server:
+      sorting_group_id: group_sensors
+      sorting_weight: 10
+
+  - platform: gpio
+    id: home_limit
+    name: "Scoop Home Limit"
+    pin:
+      number: ${pin_home_switch}
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on: 10ms
+      - delayed_off: 10ms
+    web_server:
+      sorting_group_id: group_sensors
+      sorting_weight: 20
+
+  - platform: template
+    name: "Last Cycle Successful"
+    lambda: |-
+      return id(cycle_success);
+
+  - platform: gpio
+    id: ir_cat_beam
+    name: "IR Cat Beam Broken"
+    pin:
+      number: ${pin_cat_ir}
+      mode:
+        input: true
+      allow_other_uses: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    web_server:
+      sorting_group_id: group_control
+      sorting_weight: 20
+
+  - platform: gpio
+    id: cat_safety_stop
+    name: "Cat Safety Stop"
+    pin:
+      number: ${pin_cat_ir}
+      mode:
+        input: true
+      allow_other_uses: true
+    filters:
+      - delayed_on: 1500ms
+      - delayed_off: 100ms
+
+  # --- Cat presence tracking ---
+  # Slow-debounced view of the same IR beam, separate from the fast
+  # ir_cat_beam / cat_safety_stop sensors used during motor movement.
+  # Confirms "cat present" after 2s of a broken beam, and confirms
+  # "cat gone" only after 20s of a clear beam — then kicks off a
+  # scoop cycle automatically once it's safe to run.
+  - platform: gpio
+    id: cat_present
+    name: "Cat Present"
+    pin:
+      number: ${pin_cat_ir}
+      mode:
+        input: true
+      allow_other_uses: true
+    filters:
+      - delayed_on: 2s
+      - delayed_off: 20s
+    on_press:
+      - lambda: |-
+          id(cat_entry_time) = (uint32_t) id(ha_time).now().timestamp;
+      - logger.log: "Cat present in litter box"
+    on_release:
+      - lambda: |-
+          uint32_t now_ts = (uint32_t) id(ha_time).now().timestamp;
+          if (id(cat_entry_time) > 0 && now_ts > id(cat_entry_time)) {
+            id(cat_visit_duration_sec) = now_ts - id(cat_entry_time);
+          }
+          id(cat_visit_duration_sensor).publish_state(id(cat_visit_duration_sec));
+      - logger.log: "Cat left litter box - running scoop cycle"
+      - script.execute: run_scoop_cycle
+    web_server:
+      sorting_group_id: group_control
+      sorting_weight: 15
+
+text_sensor:
+  - platform: template
+    id: litterbox_state_text
+    name: "Litter Box State"
+    web_server:
+      sorting_group_id: group_sensors
+      sorting_weight: 30
+
+  - platform: template
+    name: "Last Successful Cycle"
+    id: last_cycle_sensor
+    lambda: |-
+      return id(last_cycle_string);
+    update_interval: never
+
+switch:
+  - platform: gpio
+    id: right_enable
+    pin: ${pin_r_en}
+    restore_mode: ALWAYS_OFF
+
+  - platform: gpio
+    id: left_enable
+    pin: ${pin_l_en}
+    restore_mode: ALWAYS_OFF
+
+button:
+  - platform: template
+    name: "Run Scoop Cycle"
+    on_press:
+      - script.execute: run_scoop_cycle
+    web_server:
+      sorting_group_id: group_control
+      sorting_weight: 10
+
+  - platform: template
+    name: "Clear Fault"
+    on_press:
+      - script.execute: reset_fault
+    web_server:
+      sorting_group_id: group_sensors
+      sorting_weight: 40
+
+  - platform: template
+    name: "Reset Total Cycles"
+    icon: "mdi:counter"
+    on_press:
+      - lambda: |-
+          // 1. Reset the underlying global variable tracking the count
+          id(total_cycles) = 0;
+
+          // 2. Immediately force the UI sensor to show 0
+          id(total_cycles_sensor).publish_state(0);
+
+output:
+  - platform: ledc
+    pin: ${pin_rpwm}
+    id: pwm_forward
+    frequency: 1000 Hz
+
+  - platform: ledc
+    pin: ${pin_lpwm}
+    id: pwm_reverse
+    frequency: 1000 Hz
+
+i2c:
+  sda: ${pin_i2c_sda}
+  scl: ${pin_i2c_scl}
+  frequency: 400kHz
+  scan: true
+
+font:
+  - file: "gfonts://Roboto"
+    id: font_state
+    size: 11
+  - file: "gfonts://Roboto"
+    id: font_info
+    size: 10
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x32"
+    address: 0x3C
+    id: oled_display
+    update_interval: 500ms
+    lambda: |-
+      it.printf(0, 0, id(font_state), "%s", id(litterbox_state_text).state.c_str());
+      it.printf(0, 18, id(font_info), "Cycles: %u", (unsigned int)id(total_cycles));
+      if (id(fault_active)) {
+        it.printf(90, 18, id(font_info), "FAULT");
+      }
+
+script:
+  - id: motor_forward
+    parameters:
+      speed_pct: float
+    then:
+      - lambda: 'id(motion_direction) = 1;'
+      - output.turn_off: pwm_reverse
+      - output.set_level:
+          id: pwm_forward
+          level: !lambda 'return speed_pct;'
+
+  - id: motor_reverse
+    parameters:
+      speed_pct: float
+    then:
+      - lambda: 'id(motion_direction) = -1;'
+      - output.turn_off: pwm_forward
+      - output.set_level:
+          id: pwm_reverse
+          level: !lambda 'return speed_pct;'
+
+  - id: motor_stop
+    then:
+      - lambda: 'id(motion_direction) = 0;'
+      - output.turn_off: pwm_forward
+      - output.turn_off: pwm_reverse
+
+  - id: jam_recovery
+    mode: single
+    parameters:
+      resume_direction: int    # 1 = forward, -1 = reverse
+    then:
+      - lambda: 'id(litterbox_state_text).publish_state("Jam Recovery");'
+      - script.execute: motor_stop
+      - delay: 500ms
+
+      # Back off opposite the jammed direction
+      - if:
+          condition:
+            lambda: 'return resume_direction == 1;'
+          then:
+            - script.execute:
+                id: motor_reverse
+                speed_pct: 1.0
+          else:
+            - script.execute:
+                id: motor_forward
+                speed_pct: 1.0
+      - delay: 1s
+      - script.execute: motor_stop
+      - delay: 500ms
+
+      - if:
+          condition:
+            lambda: 'return id(jam_retry_count) < 1;'
+          then:
+            # --- Full-speed retry ---
+            - lambda: |-
+                id(jam_retry_count)++;
+                id(litterbox_state_text).publish_state("Retrying after jam");
+            - if:
+                condition:
+                  lambda: 'return resume_direction == 1;'
+                then:
+                  - script.execute: {id: motor_forward, speed_pct: 1.0}
+                else:
+                  - script.execute: {id: motor_reverse, speed_pct: 1.0}
+          else:
+            # --- Retry exhausted: attempt slow creep before faulting ---
+            - lambda: 'id(litterbox_state_text).publish_state("Attempting creep recovery");'
+            - if:
+                condition:
+                  lambda: 'return resume_direction == 1;'
+                then:
+                  - script.execute: {id: motor_forward, speed_pct: 0.25}
+                else:
+                  - script.execute: {id: motor_reverse, speed_pct: 0.25}
+
+            - wait_until:
+                condition:
+                  or:
+                    - binary_sensor.is_on: dump_limit
+                    - binary_sensor.is_on: home_limit
+                timeout: 10s
+
+            - script.execute: motor_stop
+
+            - if:
+                condition:
+                  lambda: |-
+                    return (resume_direction == 1 && id(dump_limit).state) ||
+                           (resume_direction == -1 && id(home_limit).state);
+                then:
+                  # Creep succeeded — log a warning but let the cycle continue
+                  - lambda: |-
+                      id(litterbox_state_text).publish_state("Recovered via creep");
+                      id(jam_retry_count) = 0;
+                  - homeassistant.event:
+                      event: esphome.litterbox_warning
+                      data:
+                        reason: "recovered_via_creep"
+                else:
+                  # Creep failed too — declare fault
+                  - lambda: |-
+                      id(fault_active) = true;
+                      id(litterbox_state_text).publish_state("FAULT - Jam Persists");
+                  - switch.turn_off: right_enable
+                  - switch.turn_off: left_enable
+                  - homeassistant.event:
+                      event: esphome.litterbox_fault
+                      data:
+                        reason: "jam_persists_after_creep"
+
+  - id: run_scoop_cycle
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(fault_active);'
+          then:
+            - lambda: 'id(litterbox_state_text).publish_state("Blocked - Fault Active, needs reset");'
+            - logger.log: "Cycle aborted: fault active, awaiting manual reset"
+          else:
+            - lambda: |-
+                id(jam_retry_count) = 0;
+                id(cycle_success) = false;
+                id(litterbox_state_text).publish_state("Checking for cat");
+
+            - if:
+                condition:
+                  binary_sensor.is_on: ir_cat_beam
+                then:
+                  - lambda: 'id(litterbox_state_text).publish_state("Waiting - cat present");'
+                else:
+                  # --- FORWARD (dump) ---
+                  - lambda: |-
+                      id(stage_done) = false;
+                      id(litterbox_state_text).publish_state("Forward - Dumping");
+                  - script.execute: {id: motor_forward, speed_pct: 1.0}
+                  - lambda: 'id(motion_timeout_counter) = 0;'
+
+                  - while:
+                      condition:
+                        lambda: 'return !id(stage_done);'
+                      then:
+                        - delay: 50ms
+
+                        - if:
+                            condition:
+                              binary_sensor.is_on: cat_safety_stop
+                            then:
+                              - script.execute: motor_stop
+                              - lambda: 'id(litterbox_state_text).publish_state("Paused - Cat Detected");'
+                              - wait_until:
+                                  condition:
+                                    not:
+                                      - binary_sensor.is_on: cat_safety_stop
+                              - lambda: 'id(litterbox_state_text).publish_state("Forward - Dumping");'
+                              - script.execute: {id: motor_forward, speed_pct: 1.0}
+                            else:
+                              - lambda: 'id(motion_timeout_counter)++;'
+
+                              - if:
+                                  condition:
+                                    or:
+                                      - binary_sensor.is_on: dump_limit
+                                      - binary_sensor.is_on: motor_jam_detected
+                                  then:
+                                    - script.execute: motor_stop
+                                    - lambda: 'id(stage_done) = true;'
+                                    - if:
+                                        condition:
+                                          binary_sensor.is_on: motor_jam_detected
+                                        then:
+                                          - script.execute: {id: jam_recovery, resume_direction: 1}
+
+                              - if:
+                                  condition:
+                                    lambda: 'return id(motion_timeout_counter) > 900;'  # 900 * 50ms ≈ 45s of actual motion, pause time excluded
+                                  then:
+                                    - script.execute: motor_stop
+                                    - lambda: |-
+                                        id(fault_active) = true;
+                                        id(stage_done) = true;
+                                        id(litterbox_state_text).publish_state("FAULT - Forward Timeout");
+                                    - switch.turn_off: right_enable
+                                    - switch.turn_off: left_enable
+                                    - homeassistant.event:
+                                        event: esphome.litterbox_fault
+                                        data:
+                                          reason: "forward_timeout"
+
+                  - if:
+                      condition:
+                        lambda: 'return id(fault_active);'
+                      then:
+                        - logger.log: "Cycle aborted after forward-stage fault"
+                      else:
+                        - delay: 3s
+
+                        # --- REVERSE (return home) ---
+                        - lambda: |-
+                            id(stage_done) = false;
+                            id(litterbox_state_text).publish_state("Reverse - Returning Home");
+                        - script.execute: {id: motor_reverse, speed_pct: 1.0}
+                        - lambda: 'id(motion_timeout_counter) = 0;'
+
+                        - while:
+                            condition:
+                              lambda: 'return !id(stage_done);'
+                            then:
+                              - delay: 50ms
+
+                              - if:
+                                  condition:
+                                    binary_sensor.is_on: cat_safety_stop
+                                  then:
+                                    - script.execute: motor_stop
+                                    - lambda: 'id(litterbox_state_text).publish_state("Paused - Cat Detected");'
+                                    - wait_until:
+                                        condition:
+                                          not:
+                                            - binary_sensor.is_on: cat_safety_stop
+                                    - lambda: 'id(litterbox_state_text).publish_state("Reverse - Returning Home");'
+                                    - script.execute: {id: motor_reverse, speed_pct: 1.0}
+                                  else:
+                                    - lambda: 'id(motion_timeout_counter)++;'
+
+                                    - if:
+                                        condition:
+                                          or:
+                                            - binary_sensor.is_on: home_limit
+                                            - binary_sensor.is_on: motor_jam_detected
+                                        then:
+                                          - script.execute: motor_stop
+                                          - lambda: 'id(stage_done) = true;'
+                                          - if:
+                                              condition:
+                                                binary_sensor.is_on: motor_jam_detected
+                                              then:
+                                                - script.execute: {id: jam_recovery, resume_direction: -1}
+
+                                    - if:
+                                        condition:
+                                          lambda: 'return id(motion_timeout_counter) > 900;'  # 900 * 50ms ≈ 45s of actual motion, pause time excluded
+                                        then:
+                                          - script.execute: motor_stop
+                                          - lambda: |-
+                                              id(fault_active) = true;
+                                              id(stage_done) = true;
+                                              id(litterbox_state_text).publish_state("FAULT - Reverse Timeout");
+                                          - switch.turn_off: right_enable
+                                          - switch.turn_off: left_enable
+                                          - homeassistant.event:
+                                              event: esphome.litterbox_fault
+                                              data:
+                                                reason: "reverse_timeout"
+
+                        - if:
+                            condition:
+                              lambda: 'return id(fault_active);'
+                            then:
+                              - logger.log: "Cycle aborted after reverse-stage fault"
+                            else:
+                              - lambda: |-
+                                  id(total_cycles)++;
+                                  id(total_cycles_sensor).publish_state(id(total_cycles));
+                                  id(cycle_success) = true;
+
+                                  auto now = id(ha_time).now();
+                                  char buffer[32];
+                                  snprintf(buffer, sizeof(buffer),
+                                          "%04d-%02d-%02d %02d:%02d:%02d",
+                                          now.year, now.month, now.day_of_month,
+                                          now.hour, now.minute, now.second);
+                                  id(last_cycle_string) = buffer;
+                                  id(last_cycle_sensor).publish_state(id(last_cycle_string));
+
+                                  id(litterbox_state_text).publish_state("Complete");
+
+  - id: reset_fault
+    then:
+      - lambda: |-
+          id(fault_active) = false;
+          id(jam_retry_count) = 0;
+          id(litterbox_state_text).publish_state("Idle - Fault Cleared");
+      - switch.turn_on: right_enable
+      - switch.turn_on: left_enable
