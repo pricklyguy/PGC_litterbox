@@ -60,31 +60,35 @@ packages:
 ```
 ---
 
-### 3 . Entities Exposed to Home Assistant
+## 3. Entities Exposed to Home Assistant
+
 Upon compilation and flashing, ESPHome exposes the following entities to Home Assistant:
 
-Sensors & Binary Sensors
-  binary_sensor.cat_present — Active when cat is inside the box.
-  sensor.cat_visit_duration — Renders duration of the most recent visit (seconds).
-  sensor.litterbox_motor_current — Real-time motor current draw.
-  sensor.litterbox_cycle_status — Reports current state (Idle, Scooping, Returning, Jam Detected).
+### **Sensors & Binary Sensors**
+* `binary_sensor.cat_present` — Active when cat is inside the box.
+* `sensor.cat_visit_duration` — Renders duration of the most recent visit (seconds).
+* `sensor.litterbox_motor_current` — Real-time motor current draw.
+* `sensor.litterbox_cycle_status` — Reports current state (`Idle`, `Scooping`, `Returning`, `Jam Detected`).
 
-Buttons & Controls
-  button.run_scoop_cycle — Triggers a full clean/dump/return cycle.
-  button.stop_motor — Emergency stop for all motor outputs.
-  button.clear_jam_error — Resets state machine after a current spike lock.
+### **Buttons & Controls**
+* `button.run_scoop_cycle` — Triggers a full clean/dump/return cycle.
+* `button.stop_motor` — Emergency stop for all motor outputs.
+* `button.clear_jam_error` — Resets state machine after a current spike lock.
 
-Safety & Operational Logic
-  Cat Entrance: cat_present goes high -> logs entrance timestamp.
-  Cat Exit: cat_present clears -> publishes visit duration sensor -> starts delayed scoop cycle script.
+---
 
-Scoop Execution:
-  Motor runs forward until limit_dump is hit or current limit threshold is exceeded.
-  Pauses briefly over waste bin.
-  Motor reverses until limit_home is hit.
+## 4. Safety & Operational Logic
 
-Safety Interrupt:
-  If cat_present becomes ON at any point during movement, the motor immediately halts and waits until the box is clear before resuming.
+1. **Cat Entrance:** `cat_present` goes high -> logs entrance timestamp.
+2. **Cat Exit:** `cat_present` clears -> publishes visit duration sensor -> starts delayed scoop cycle script.
+3. **Scoop Execution:**
+   * Motor runs forward until `limit_dump` is hit or current limit threshold is exceeded.
+   * Pauses briefly over waste bin.
+   * Motor reverses until `limit_home` is hit.
+4. **Safety Interrupt:** If `cat_present` becomes `ON` at any point during movement, the motor immediately halts and waits until the box is clear before resuming.
 
-License
-Distributed under the GPL-3.0 License. See LICENSE for details.
+---
+
+## License
+
+Distributed under the **GPL-3.0 License**. See `LICENSE` for details.
