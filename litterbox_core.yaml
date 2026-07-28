@@ -254,7 +254,16 @@ binary_sensor:
           }
           id(cat_visit_duration_sensor).publish_state(id(cat_visit_duration_sec));
       - logger.log: "Cat left litter box - running scoop cycle"
-      - script.execute: run_scoop_cycle
+# --- Guard check added below ---
+      - if:
+          condition:
+            not:
+              script.is_running: run_scoop_cycle
+          then:
+            - script.execute: run_scoop_cycle
+          else:
+            - logger.log: "Scoop cycle trigger ignored: cycle already in progress"      
+     
     web_server:
       sorting_group_id: group_control
       sorting_weight: 15
@@ -289,7 +298,14 @@ button:
   - platform: template
     name: "Run Scoop Cycle"
     on_press:
-      - script.execute: run_scoop_cycle
+      - if:
+          condition:
+            not:
+              script.is_running: run_scoop_cycle
+          then:
+            - script.execute: run_scoop_cycle
+          else:
+            - logger.log: "Manual trigger ignored: cycle already in progress"
     web_server:
       sorting_group_id: group_control
       sorting_weight: 10
