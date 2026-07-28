@@ -58,8 +58,9 @@ packages:
   common: !include packages/common_sensors.yaml
   web: !include packages/web.yaml
 ```
+---
 
-##3 . Entities Exposed to Home Assistant
+### 3 . Entities Exposed to Home Assistant
 Upon compilation and flashing, ESPHome exposes the following entities to Home Assistant:
 
 Sensors & Binary Sensors
